@@ -41,8 +41,12 @@ type TestSpec struct {
 	// tests. If no tags are specified, the set ["default"] is automatically
 	// given.
 	Tags []string
+
 	// Cluster provides the specification for the cluster to use for the test.
 	Cluster spec.ClusterSpec
+
+	// MultiCluster provides the specification for the cluster to use for the test.
+	MultiCluster []spec.ClusterSpec
 
 	// UseIOBarrier controls the local-ssd-no-ext4-barrier flag passed to
 	// roachprod when creating a cluster. If set, the flag is not passed, and so
@@ -76,6 +80,9 @@ type TestSpec struct {
 
 	// Run is the test function.
 	Run func(ctx context.Context, t test.Test, c cluster.Cluster)
+
+	// Run is the test function with multi clusters.
+	RunMulti func(ctx context.Context, t test.Test, c cluster.Cluster, c2 cluster.Cluster)
 }
 
 // MatchOrSkip returns true if the filter matches the test. If the filter does

@@ -189,22 +189,12 @@ func (p *workPool) selectTest(ctx context.Context, qp *quotapool.IntPool) (testT
 			return 0, nil
 		}
 
-		candidateIdx := -1
-		candidateCount := 0
 		smallestTest := math.MaxInt64
-		for i, t := range p.mu.tests {
-			cpu := t.spec.Cluster.NodeCount * t.spec.Cluster.CPUs
-			if cpu < smallestTest {
-				smallestTest = cpu
-			}
-			if uint64(cpu) > pi.Available {
-				continue
-			}
-			if t.count > candidateCount {
-				candidateIdx = i
-				candidateCount = t.count
-			}
-		}
+		candidateCount := 0
+		candidateIdx := countCPU(p, pi, smallestTest, -1, candidateCount)
+		//TODO: Gotta multiply by the number of cluster in the spec.
+		// Maybe duplicate logic for multi cluster case. Helper func to give value
+		// cpu = node count * cpu * cluster
 
 		if candidateIdx == -1 {
 			if uint64(smallestTest) > pi.Capacity {
@@ -298,4 +288,46 @@ func (p *workPool) decTestLocked(ctx context.Context, name string) {
 		// We've selected the last run for a test. Take that test out of the pool.
 		p.mu.tests = append(p.mu.tests[:idx], p.mu.tests[idx+1:]...)
 	}
+}
+
+//
+
+func countCPU(p *workPool, pi quotapool.PoolInfo, smallestTest int, candidateIdx int, candidateCount int) int {
+
+	for i, t := range p.mu.tests {
+		var multicluster bool
+		if len(t.spec.MultiCluster) > 0 {
+			multicluster = true
+		}
+
+		switch multicluster {
+		case true:
+			cpu := t.spec.Cluster.NodeCount * t.spec.Cluster.CPUs * len(t.spec.MultiCluster)
+			if cpu < smallestTest {
+				smallestTest = cpu
+			}
+			if uint64(cpu) > pi.Available {
+				continue
+			}
+			if t.count > candidateCount {
+				candidateIdx = i
+				candidateCount = t.count
+			}
+
+		default:
+			cpu := t.spec.Cluster.NodeCount * t.spec.Cluster.CPUs
+			if cpu < smallestTest {
+				smallestTest = cpu
+			}
+			if uint64(cpu) > pi.Available {
+				continue
+			}
+			if t.count > candidateCount {
+				candidateIdx = i
+				candidateCount = t.count
+			}
+
+		}
+	}
+	return candidateIdx
 }

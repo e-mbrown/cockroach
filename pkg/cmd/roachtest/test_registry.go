@@ -108,11 +108,17 @@ func (r *testRegistryImpl) prepareSpec(spec *registry.TestSpec) error {
 	}
 
 	if spec.Run == nil {
-		return fmt.Errorf("%s: must specify Run", spec.Name)
+		if spec.RunMulti == nil {
+			return fmt.Errorf("%s: must specify Run or RunMulti", spec.Name)
+		}
 	}
 
 	if spec.Cluster.ReusePolicy == nil {
-		return fmt.Errorf("%s: must specify a ClusterReusePolicy", spec.Name)
+		// TODO(emb): Will need to be changed if we plan to allow
+		// multicluster reuse
+		if spec.MultiCluster[0].ReusePolicy == nil {
+			return fmt.Errorf("%s: must specify a ClusterReusePolicy", spec.Name)
+		}
 	}
 
 	// All tests must have an owner so the release team knows who signs off on

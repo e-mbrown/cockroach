@@ -209,6 +209,7 @@ func (r *testRunner) Run(
 	}
 
 	if name := clustersOpt.clusterName; name != "" {
+
 		// Since we were given a cluster, check that all tests we have to run have compatible specs.
 		// We should also check against the spec of the cluster, but we don't
 		// currently have a way of doing that; we're relying on the fact that attaching to the cluster
@@ -365,7 +366,6 @@ func defaultClusterAllocator(
 			return attachToExistingCluster(ctx, existingClusterName, clusterL, t.Cluster, opt, r.cr)
 		}
 		lopt.l.PrintfCtx(ctx, "Creating new cluster for test %s: %s", t.Name, t.Cluster)
-
 		cfg := clusterConfig{
 			spec:         t.Cluster,
 			artifactsDir: artifactsDir,
@@ -435,6 +435,8 @@ func (r *testRunner) runWorker(
 	}()
 
 	var c *clusterImpl // The cluster currently being used.
+	var clusters []*clusterImpl
+
 	// When this method returns we'll destroy the cluster we had at the time.
 	// Note that, if debug was set, c has been set to nil.
 	defer func() {
@@ -484,6 +486,7 @@ func (r *testRunner) runWorker(
 
 		wStatus.SetTest(nil /* test */, testToRunRes{})
 		wStatus.SetStatus("getting work")
+		//optionally uses cluster
 		testToRun, err = r.getWork(
 			ctx, work, qp, c, interrupt, l,
 			getWorkCallbacks{
@@ -538,7 +541,32 @@ func (r *testRunner) runWorker(
 			// N.B. non-reusable cluster would have been destroyed above.
 			wStatus.SetTest(nil /* test */, testToRun)
 			wStatus.SetStatus("creating cluster")
-			c, clusterCreateErr = allocateCluster(ctx, testToRun.spec, testToRun.alloc, artifactsRootDir, wStatus)
+			//TODO: Allocate Cluster per cluster(Alter allocate Cluster)
+			//TODO: Special cases, is multicluster? Yes loop and make slice
+			// bail out early
+			switch {
+			//TODO(emb): Better error handling
+			case len(testToRun.spec.MultiCluster) > 0:
+				tempSpecA, tempSpecB := testToRun.spec, testToRun.spec
+				tempSpecA.Cluster = testToRun.spec.MultiCluster[0]
+				tempSpecB.Cluster = testToRun.spec.MultiCluster[1]
+
+				c1, clusterCreateErr := allocateCluster(ctx, tempSpecA, testToRun.alloc, artifactsRootDir, wStatus)
+				if clusterCreateErr != nil {
+					atomic.AddInt32(&r.numClusterErrs, 1)
+					shout(ctx, l, stdout, "Unable to create (or reuse) cluster for test %s due to: %s.",
+						testToRun.spec.Name, clusterCreateErr)
+				}
+
+				c2, clusterCreateErr := allocateCluster(ctx, tempSpecB, testToRun.alloc, artifactsRootDir, wStatus)
+				clusters = append(clusters, c1, c2)
+			default:
+				c, clusterCreateErr = allocateCluster(ctx, testToRun.spec, testToRun.alloc, artifactsRootDir, wStatus)
+				clusters = append(clusters, c)
+			}
+
+			l.PrintfCtx(ctx, "Here! Cluster A: %s, CLuster B: %s", clusters[0].Name(), clusters[1].Name())
+
 			if clusterCreateErr != nil {
 				atomic.AddInt32(&r.numClusterErrs, 1)
 				shout(ctx, l, stdout, "Unable to create (or reuse) cluster for test %s due to: %s.",
@@ -578,7 +606,6 @@ func (r *testRunner) runWorker(
 		}
 		// Now run the test.
 		l.PrintfCtx(ctx, "starting test: %s:%d", testToRun.spec.Name, testToRun.runNum)
-
 		if clusterCreateErr != nil {
 			// N.B. cluster creation must have failed...
 			// We don't want to prematurely abort the test suite since it's likely a transient issue.
@@ -600,9 +627,25 @@ func (r *testRunner) runWorker(
 		} else {
 			// Tell the cluster that, from now on, it will be run "on behalf of this
 			// test".
-			c.status("running test")
-			c.setTest(t)
+			l.PrintfCtx(
+				ctx,
+				"Above Original trace error! Cluster A: %s, CLuster B: %s, Test: %s",
+				clusters[0].Name(),
+				clusters[1].Name(),
+				t.Name(),
+			)
 
+			c.status("running test")
+			clusters[0].setTest(t)
+
+			//if len(testToRun.spec.MultiCluster) > 0 {
+			//	clusters[1].setTest(t)
+			//}
+			l.PrintfCtx(
+				ctx,
+				"Test is set moving to testspec, encryption: %s",
+				t.Spec().(*registry.TestSpec).EncryptionSupport.String(),
+			)
 			switch t.Spec().(*registry.TestSpec).EncryptionSupport {
 			case registry.EncryptionAlwaysEnabled:
 				c.encAtRest = true
@@ -615,12 +658,24 @@ func (r *testRunner) runWorker(
 				c.encAtRest = prng.Float64() < encryptionProbability
 			}
 
-			wStatus.SetCluster(c)
+			l.PrintfCtx(
+				ctx,
+				"wstatus is being set, testtorun- num: %d, reuse: %b",
+				testToRun.runNum,
+				testToRun.canReuseCluster,
+			)
+			wStatus.SetCluster(clusters[0])
 			wStatus.SetTest(t, testToRun)
-			wStatus.SetStatus("running test")
 
-			err = r.runTest(ctx, t, testToRun.runNum, testToRun.runCount, c, stdout, testL)
+			wStatus.SetStatus("running test")
+			//TODO: run test pass the multi cluster implication
+			err = r.runTest(ctx, t, testToRun.runNum, testToRun.runCount, clusters, stdout, testL)
 		}
+
+		l.PrintfCtx(
+			ctx,
+			"Test is actually running, I think",
+		)
 
 		if err != nil {
 			shout(ctx, l, stdout, "test returned error: %s: %s", t.Name(), err)
@@ -665,6 +720,10 @@ func (r *testRunner) runWorker(
 			}
 		} else {
 			// Upon success fetch the perf artifacts from the remote hosts.
+			l.PrintfCtx(
+				ctx,
+				"Got to PerfArtifacts",
+			)
 			getPerfArtifacts(ctx, l, c, t)
 		}
 	}
@@ -728,7 +787,7 @@ func (r *testRunner) runTest(
 	t *testImpl,
 	runNum int,
 	runCount int,
-	c *clusterImpl,
+	clusters []*clusterImpl,
 	stdout io.Writer,
 	l *logger.Logger,
 ) error {
@@ -835,6 +894,16 @@ func (r *testRunner) runTest(
 				r.status.skip[t] = struct{}{}
 			}
 		}
+		if t.Spec().(*registry.TestSpec).RunMulti != nil {
+			//Not sure if we need to change logic
+			//if t.Failed() {
+			//	r.status.fail[t] = struct{}{}
+			//} else if t.Spec().(*registry.TestSpec).Skip == "" {
+			//	r.status.pass[t] = struct{}{}
+			//} else {
+			//	r.status.skip[t] = struct{}{}
+			//}
+		}
 		r.status.Unlock()
 	}()
 
@@ -847,13 +916,16 @@ func (r *testRunner) runTest(
 	// Make sure the cluster has enough life left for the test plus enough headroom
 	// after the test finishes so that the next test can be selected. If it
 	// doesn't, extend it.
-	minExp := timeutil.Now().Add(timeout + time.Hour)
-	if c.expiration.Before(minExp) {
-		extend := minExp.Sub(c.expiration)
-		l.PrintfCtx(ctx, "cluster needs to survive until %s, but has expiration: %s. Extending.",
-			minExp, c.expiration)
-		if err := c.Extend(ctx, extend, l); err != nil {
-			return errors.Wrapf(err, "failed to extend cluster: %s", c.name)
+
+	for i, c := range clusters {
+		minExp := timeutil.Now().Add(timeout + time.Hour)
+		if c.expiration.Before(minExp) {
+			extend := minExp.Sub(c.expiration)
+			l.PrintfCtx(ctx, "cluster %d needs to survive until %s, but has expiration: %s. Extending.", i,
+				minExp, c.expiration)
+			if err := c.Extend(ctx, extend, l); err != nil {
+				return errors.Wrapf(err, "failed to extend cluster: %s", c.name)
+			}
 		}
 	}
 
@@ -881,7 +953,13 @@ func (r *testRunner) runTest(
 		}()
 
 		// This is the call to actually run the test.
-		t.Spec().(*registry.TestSpec).Run(runCtx, t, c)
+		if t.Spec().(*registry.TestSpec).RunMulti != nil {
+			//TODO: pass the multiple cluster implications
+			t.Spec().(*registry.TestSpec).RunMulti(runCtx, t, clusters[0], clusters[1])
+		} else {
+			t.Spec().(*registry.TestSpec).Run(runCtx, t, clusters[0])
+		}
+
 	}()
 
 	var timedOut bool
@@ -904,20 +982,25 @@ func (r *testRunner) runTest(
 	// From now on, all logging goes to teardown.log to give a clear
 	// separation between operations originating from the test vs the
 	// harness.
-	teardownL, err := c.l.ChildLogger("teardown", logger.QuietStderr, logger.QuietStdout)
-	if err != nil {
-		return err
+	//TODO: Make sure both clusters are actually torn down. Also maybe handle better?
+	for _, c := range clusters {
+		teardownL, err := c.l.ChildLogger("teardown", logger.QuietStderr, logger.QuietStdout)
+		if err != nil {
+			return err
+		}
+		l, c.l = teardownL, teardownL
+		t.ReplaceL(teardownL)
+		err = r.teardownTest(ctx, t, c, timedOut)
+		if err != nil {
+			return err
+		}
 	}
-	l, c.l = teardownL, teardownL
-	t.ReplaceL(teardownL)
-
-	return r.teardownTest(ctx, t, c, timedOut)
+	return nil
 }
 
 func (r *testRunner) teardownTest(
 	ctx context.Context, t *testImpl, c *clusterImpl, timedOut bool,
 ) error {
-
 	// We still have to collect artifacts and run post-flight checks, and any of
 	// these might hang. So they go into a goroutine and the main goroutine
 	// abandons them after a timeout. We intentionally don't wait for the
@@ -1194,7 +1277,7 @@ func (r *testRunner) getWork(
 		return testToRunRes{}, fmt.Errorf("interrupted")
 	default:
 	}
-
+	///TODO: MARK
 	testToRun, err := work.getTestToRun(ctx, c, qp, r.cr, callbacks.onDestroy, l)
 	if err != nil {
 		return testToRunRes{}, err
