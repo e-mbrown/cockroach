@@ -440,6 +440,11 @@ func (tc *TestCluster) Start(t testing.TB) {
 		}
 	}
 
+	// Create the test user
+	if _, err := tc.Conns[0].Exec(`CREATE USER testuser;`); err != nil {
+		t.Fatal(err)
+	}
+
 	// Create a closer that will stop the individual server stoppers when the
 	// cluster stopper is stopped.
 	tc.stopper.AddCloser(stop.CloserFn(func() { tc.stopServers(context.TODO()) }))

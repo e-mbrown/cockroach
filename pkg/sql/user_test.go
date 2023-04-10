@@ -12,6 +12,7 @@ package sql_test
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/sql/tests"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -245,4 +246,27 @@ GRANT admin TO foo`); err != nil {
 			}()
 		}()
 	})
+}
+
+func TestClusterUser(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	ctx := context.Background()
+	params, _ := tests.CreateTestServerParams()
+
+	s, sqlDB, _ := serverutils.StartServer(t, params)
+	defer s.Stopper().Stop(ctx)
+
+	var user string
+	if err := sqlDB.QueryRow("SELECT current_user;").Scan(&user); err != nil {
+		t.Fatal(err)
+	}
+	require.True(t, user == username.TestUser)
+
+	sqlDB.QueryRow("SELECT 1;")
+	if err := sqlDB.QueryRow("SELECT current_user;").Scan(&user); err != nil {
+		t.Fatal(err)
+	}
+	require.True(t, user == username.TestUser)
 }
