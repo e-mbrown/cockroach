@@ -21,6 +21,7 @@ import (
 	"context"
 	gosql "database/sql"
 	"flag"
+	"fmt"
 	"math/rand"
 	"net/url"
 	"testing"
@@ -393,17 +394,44 @@ func NewServer(params base.TestServerArgs) (TestServerInterface, error) {
 func OpenDBConnE(
 	sqlAddr string, useDatabase string, insecure bool, stopper *stop.Stopper,
 ) (*gosql.DB, error) {
-	pgURL, cleanupGoDB, err := sqlutils.PGUrlE(
-		sqlAddr, "StartServer" /* prefix */, url.User(username.RootUser))
+	rootURL, cleanupGoDB, err := sqlutils.PGUrlE(
+		sqlAddr, "StartServerPrep" /* prefix */, url.User(username.RootUser))
 	if err != nil {
 		return nil, err
 	}
 
-	pgURL.Path = useDatabase
-	if insecure {
-		pgURL.RawQuery = "sslmode=disable"
+	testURL, cleanupGoDB2, err := sqlutils.PGUrlE(
+		sqlAddr, "StartServer" /* prefix */, url.User(username.TestUser))
+	if err != nil {
+		return nil, err
 	}
-	goDB, err := gosql.Open("postgres", pgURL.String())
+
+	rootURL.Path = useDatabase
+	testURL.Path = useDatabase
+	if insecure {
+		rootURL.RawQuery = "sslmode=disable"
+		testURL.RawQuery = "sslmode=disable"
+	}
+
+	testDB, err := gosql.Open("postgres", rootURL.String())
+	if err != nil {
+		return nil, err
+	}
+
+	// Create testuser
+	if _, err := testDB.Exec(fmt.Sprintf(`CREATE USER %s`, username.TestUser)); err != nil {
+		return nil, err
+	}
+
+	stopper.AddCloser(
+		stop.CloserFn(func() {
+			_ = testDB.Close()
+			cleanupGoDB()
+		},
+		))
+
+	// Create a DB using the testuser
+	goDB, err := gosql.Open("postgres", testURL.String())
 	if err != nil {
 		return nil, err
 	}
@@ -411,8 +439,9 @@ func OpenDBConnE(
 	stopper.AddCloser(
 		stop.CloserFn(func() {
 			_ = goDB.Close()
-			cleanupGoDB()
+			cleanupGoDB2()
 		}))
+
 	return goDB, nil
 }
 
